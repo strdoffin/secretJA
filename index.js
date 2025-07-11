@@ -1,4 +1,5 @@
 require("dotenv").config();
+const axios = require("axios");
 const {
     Client,
     GatewayIntentBits,
@@ -20,14 +21,10 @@ const AIRTABLE_URL = `https://api.airtable.com/v0/${BASE_ID}/${encodeURIComponen
     TABLE_NAME
 )}`;
 
-const fetch = (...args) =>
-    import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
-// Slash command setup
 const commands = [
     new SlashCommandBuilder()
         .setName("verify")
@@ -55,29 +52,37 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
     }
 })();
 
-// Fetch records from Airtable
+// ✅ Airtable pagination support with axios
 async function fetchAirtableRecords() {
+    let records = [];
+    let offset = null;
+
     try {
-        const res = await fetch(AIRTABLE_URL, {
-            headers: {
-                Authorization: `Bearer ${AIRTABLE_TOKEN}`,
-                "Content-Type": "application/json",
-            },
-        });
+        do {
+            const url = `${AIRTABLE_URL}${offset ? `?offset=${offset}` : ""}`;
+            const response = await axios.get(url, {
+                headers: {
+                    Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+                    "Content-Type": "application/json",
+                },
+                timeout: 10000,
+            });
 
-        if (!res.ok) {
-            const errorText = await res.text();
-            throw new Error(
-                `Airtable fetch error: ${res.status} ${res.statusText} - ${errorText}`
-            );
-        }
-
-        const data = await res.json();
-        return data.records;
+            records = records.concat(response.data.records);
+            offset = response.data.offset;
+        } while (offset);
     } catch (err) {
-        console.error("Error fetching Airtable records:", err);
-        return [];
+        if (err.response) {
+            console.error(
+                `Airtable fetch error: ${err.response.status} ${err.response.statusText} -`,
+                err.response.data
+            );
+        } else {
+            console.error("Error fetching Airtable records:", err.message);
+        }
     }
+
+    return records;
 }
 
 client.on("ready", () => {
@@ -88,7 +93,6 @@ client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== "verify") return;
 
-    // Defer reply (ephemeral using flags)
     await interaction.deferReply({ flags: 1 << 6 });
 
     const inputStudentid = interaction.options
@@ -98,41 +102,56 @@ client.on("interactionCreate", async (interaction) => {
 
     const records = await fetchAirtableRecords();
 
-    const matchedRecord = records.find((record) => {
+    const matchedRecords = records.filter((record) => {
         const studentId = (record.fields.studentId || "").toLowerCase().trim();
         return studentId === inputStudentid;
     });
 
-    if (!matchedRecord) {
+    if (matchedRecords.length === 0) {
         return interaction.editReply(
-            "❌ ไม่พบข้อมูลของคุณในฐานข้อมูล โปรดติดต่อAdmin."
+            "❌ ไม่พบข้อมูลของคุณในฐานข้อมูล โปรดติดต่อ Admin."
         );
     }
 
-    // Game and TeamName fields
-    let games = matchedRecord.fields.Game || [];
-    if (typeof games === "string") games = [games];
-    const teamName = matchedRecord.fields.TeamName;
+    const allGames = new Set();
+    const allTeams = new Set();
+    const mergedFields = {};
+
+    for (const record of matchedRecords) {
+        let games = record.fields.Game || [];
+        if (typeof games === "string") games = [games];
+        for (const g of games) allGames.add(g);
+
+        if (record.fields.TeamName) allTeams.add(record.fields.TeamName);
+
+        for (const [key, value] of Object.entries(record.fields)) {
+            if (
+                ["studentid", "instagram", "discord"].includes(
+                    key.toLowerCase()
+                )
+            )
+                continue;
+            mergedFields[key] = value;
+        }
+    }
 
     const guild = interaction.guild;
     const member = await guild.members.fetch(interaction.user.id);
     const rolesToAdd = [];
 
-    // Add game roles
-    for (const gameName of games) {
+    for (const gameName of allGames) {
         const role = guild.roles.cache.find(
             (r) => r.name.toLowerCase() === gameName.toLowerCase()
         );
         if (role) rolesToAdd.push(role);
     }
 
-    // Add team role
-    if (teamName) {
-        const teamRole = guild.roles.cache.find(
+    for (const teamName of allTeams) {
+        const role = guild.roles.cache.find(
             (r) => r.name.toLowerCase() === teamName.toLowerCase()
         );
-        if (teamRole && !rolesToAdd.some((r) => r.id === teamRole.id)) {
-            rolesToAdd.push(teamRole);
+        if (role && !rolesToAdd.some((r) => r.id === role.id)) {
+            rolesToAdd.push(role);
         }
     }
 
@@ -147,7 +166,6 @@ client.on("interactionCreate", async (interaction) => {
 
         await interaction.editReply(`✅ ยืนยันตัวตนสำเร็จ`);
 
-        // Custom field label mapping
         const customFieldNames = {
             Name: "ชื่อจริง",
             Lastname: "นามสกุล",
@@ -162,15 +180,9 @@ client.on("interactionCreate", async (interaction) => {
             .setThumbnail(interaction.user.displayAvatarURL())
             .setTimestamp();
 
-        // Add filtered fields
-        for (const [key, value] of Object.entries(matchedRecord.fields)) {
-            if (
-                ["studentid", "instagram", "discord"].includes(
-                    key.toLowerCase()
-                )
-            )
-                continue;
-
+        // Add other fields from mergedFields except filtered keys
+        for (const [key, value] of Object.entries(mergedFields)) {
+            if (["Game", "TeamName"].includes(key)) continue; // Skip these because shown above
             const displayName = customFieldNames[key] || key;
             embed.addFields({
                 name: displayName,
@@ -178,8 +190,18 @@ client.on("interactionCreate", async (interaction) => {
                 inline: true,
             });
         }
+        // Add summary text with all game names and team names nicely joined
+        embed.addFields({
+            name: "เกมที่แข่ง",
+            value: Array.from(allGames).join(", ") || "-",
+            inline: true,
+        });
+        embed.addFields({
+            name: "ชื่อทีม",
+            value: Array.from(allTeams).join(", ") || "-",
+            inline: true,
+        });
 
-        // Send public embed to channel
         await interaction.channel.send({ embeds: [embed] });
     } catch (error) {
         console.error("Error assigning roles:", error);
