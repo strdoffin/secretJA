@@ -27,8 +27,8 @@ const client = new Client({
 
 const commands = [
     new SlashCommandBuilder()
-        .setName("verify")
-        .setDescription("Verify student and assign game roles")
+        .setName("esport")
+        .setDescription("Verify Esport Player")
         .addStringOption((option) =>
             option
                 .setName("รหัสนักศึกษา")
@@ -91,7 +91,7 @@ client.on("ready", () => {
 
 client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== "verify") return;
+    if (interaction.commandName !== "esport") return;
 
     await interaction.deferReply({ flags: 1 << 6 });
 
