@@ -1,11 +1,11 @@
 require("dotenv").config();
 const axios = require("axios");
 const {
-    Client,
-    GatewayIntentBits,
-    SlashCommandBuilder,
-    Routes,
-    EmbedBuilder,
+	Client,
+	GatewayIntentBits,
+	SlashCommandBuilder,
+	Routes,
+	EmbedBuilder,
 } = require("discord.js");
 const { REST } = require("@discordjs/rest");
 
@@ -18,197 +18,282 @@ const TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
 const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
 
 const AIRTABLE_URL = `https://api.airtable.com/v0/${BASE_ID}/${encodeURIComponent(
-    TABLE_NAME
+	TABLE_NAME
 )}`;
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
 const commands = [
-    new SlashCommandBuilder()
-        .setName("esport")
-        .setDescription("Verify Esport Player")
-        .addStringOption((option) =>
-            option
-                .setName("รหัสนักศึกษา")
-                .setDescription("กรอกรหัสนักศึกษา")
-                .setRequired(true)
-        )
-        .toJSON(),
+	new SlashCommandBuilder()
+		.setName("esport")
+		.setDescription("Verify Esport Player")
+		.addStringOption((option) =>
+			option
+				.setName("รหัสนักศึกษา")
+				.setDescription("กรอกรหัสนักศึกษา")
+				.setRequired(true)
+		)
+		.toJSON(),
+	new SlashCommandBuilder()
+		.setName("gate")
+		.setDescription("Verify and add Gate role by student ID")
+		.addStringOption((option) =>
+			option.setName("id").setDescription("Your Student ID").setRequired(true)
+		)
+		.toJSON()
 ];
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-    try {
-        console.log("Registering slash commands...");
-        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-            body: commands,
-        });
-        console.log("Slash commands registered.");
-    } catch (err) {
-        console.error(err);
-    }
+	try {
+		console.log("Registering slash commands...");
+		await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+			body: commands,
+		});
+		console.log("Slash commands registered.");
+	} catch (err) {
+		console.error(err);
+	}
 })();
 
 // ✅ Airtable pagination support with axios
 async function fetchAirtableRecords() {
-    let records = [];
-    let offset = null;
+	let records = [];
+	let offset = null;
 
-    try {
-        do {
-            const url = `${AIRTABLE_URL}${offset ? `?offset=${offset}` : ""}`;
-            const response = await axios.get(url, {
-                headers: {
-                    Authorization: `Bearer ${AIRTABLE_TOKEN}`,
-                    "Content-Type": "application/json",
-                },
-                timeout: 10000,
-            });
+	try {
+		do {
+			const url = `${AIRTABLE_URL}${offset ? `?offset=${offset}` : ""}`;
+			const response = await axios.get(url, {
+				headers: {
+					Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+					"Content-Type": "application/json",
+				},
+				timeout: 10000,
+			});
 
-            records = records.concat(response.data.records);
-            offset = response.data.offset;
-        } while (offset);
-    } catch (err) {
-        if (err.response) {
-            console.error(
-                `Airtable fetch error: ${err.response.status} ${err.response.statusText} -`,
-                err.response.data
-            );
-        } else {
-            console.error("Error fetching Airtable records:", err.message);
-        }
-    }
+			records = records.concat(response.data.records);
+			offset = response.data.offset;
+		} while (offset);
+	} catch (err) {
+		if (err.response) {
+			console.error(
+				`Airtable fetch error: ${err.response.status} ${err.response.statusText} -`,
+				err.response.data
+			);
+		} else {
+			console.error("Error fetching Airtable records:", err.message);
+		}
+	}
 
-    return records;
+	return records;
+}
+async function fetchGateTableRecords() {
+	let records = [];
+	let offset = null;
+	const tableName = process.env.AIRTABLE_GATE_TABLE || "Gate";
+	const urlBase = `https://api.airtable.com/v0/${BASE_ID}/${encodeURIComponent(tableName)}`;
+
+	try {
+		do {
+			const url = `${urlBase}${offset ? `?offset=${offset}` : ""}`;
+			const response = await axios.get(url, {
+				headers: {
+					Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+					"Content-Type": "application/json",
+				},
+				timeout: 10000,
+			});
+
+			records = records.concat(response.data.records);
+			offset = response.data.offset;
+		} while (offset);
+	} catch (err) {
+		console.error(`Error fetching Gate table:`, err.message);
+	}
+
+	return records;
 }
 
-client.on("ready", () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
+let gateCache = [];
+
+client.on("ready", async () => {
+	console.log(`✅ Logged in as ${client.user.tag}`);
+
+	gateCache = await fetchGateTableRecords();
+	console.log(`🧠 Gate table cached: ${gateCache.length} records`);
 });
 
 client.on("interactionCreate", async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== "esport") return;
+	if (!interaction.isChatInputCommand()) return;
 
-    await interaction.deferReply({ flags: 1 << 6 });
+	// /gate command
+	if (interaction.commandName === "gate") {
+		await interaction.deferReply({ ephemeral: false });
 
-    const inputStudentid = interaction.options
-        .getString("รหัสนักศึกษา")
-        .toLowerCase()
-        .trim();
+		const inputId = interaction.options.getString("id").toLowerCase().trim();
 
-    const records = await fetchAirtableRecords();
+		const matched = gateCache.find((record) => {
+			const idField = (record.fields.ID || "").toLowerCase().trim();
+			return idField === inputId;
+		});
 
-    const matchedRecords = records.filter((record) => {
-        const studentId = (record.fields.studentId || "").toLowerCase().trim();
-        return studentId === inputStudentid;
-    });
+		if (!matched) {
+			return interaction.editReply("❌ ไม่พบข้อมูลในระบบ Gate");
+		}
 
-    if (matchedRecords.length === 0) {
-        return interaction.editReply(
-            "❌ ไม่พบข้อมูลของคุณในฐานข้อมูล โปรดติดต่อ Admin."
-        );
-    }
+		const gateValue = (matched.fields.Gate || "").toLowerCase();
 
-    const allGames = new Set();
-    const allTeams = new Set();
-    const mergedFields = {};
+		if (!gateValue) {
+			return interaction.editReply("⚠️ ไม่พบค่าของ Gate สำหรับ ID นี้");
+		}
 
-    for (const record of matchedRecords) {
-        let games = record.fields.Game || [];
-        if (typeof games === "string") games = [games];
-        for (const g of games) allGames.add(g);
+		const role = interaction.guild.roles.cache.find(
+			(r) => r.name.toLowerCase() === gateValue
+		);
 
-        if (record.fields.TeamName) allTeams.add(record.fields.TeamName);
+		if (!role) {
+			return interaction.editReply("⚠️ ไม่พบ role ที่ตรงกับค่า Gate ใน Discord");
+		}
 
-        for (const [key, value] of Object.entries(record.fields)) {
-            if (
-                ["studentid", "instagram", "discord"].includes(
-                    key.toLowerCase()
-                )
-            )
-                continue;
-            mergedFields[key] = value;
-        }
-    }
+		try {
+			const member = await interaction.guild.members.fetch(interaction.user.id);
+			await member.roles.add(role);
 
-    const guild = interaction.guild;
-    const member = await guild.members.fetch(interaction.user.id);
-    const rolesToAdd = [];
+			const embed = new EmbedBuilder()
+				.setTitle("✅ รับRole Gateสำเร็จ")
+				.setColor(0x804000)
+				.setDescription(`คุณได้รับ Role: **${role.name}**`)
+				.setThumbnail(interaction.user.displayAvatarURL())
+				.setTimestamp();
 
-    for (const gameName of allGames) {
-        const role = guild.roles.cache.find(
-            (r) => r.name.toLowerCase() === gameName.toLowerCase()
-        );
-        if (role) rolesToAdd.push(role);
-    }
+			return interaction.editReply({ embeds: [embed], ephemeral: false });
+		} catch (err) {
+			console.error("Role add error:", err);
+			return interaction.editReply({
+				content: "❌ เพิ่ม role ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ของบอท",
+				ephemeral: false,
+			});
+		}
+	}
 
-    for (const teamName of allTeams) {
-        const role = guild.roles.cache.find(
-            (r) => r.name.toLowerCase() === teamName.toLowerCase()
-        );
-        if (role && !rolesToAdd.some((r) => r.id === role.id)) {
-            rolesToAdd.push(role);
-        }
-    }
+	// /esport command
+	else if (interaction.commandName === "esport") {
+		await interaction.deferReply({ flags: 1 << 6 });
 
-    if (rolesToAdd.length === 0) {
-        return interaction.editReply(
-            "⚠️ No matching roles found in the server for your games or team."
-        );
-    }
+		const inputStudentid = interaction.options
+			.getString("รหัสนักศึกษา")
+			.toLowerCase()
+			.trim();
 
-    try {
-        await member.roles.add(rolesToAdd);
+		const records = await fetchAirtableRecords();
 
-        await interaction.editReply(`✅ ยืนยันตัวตนสำเร็จ`);
+		const matchedRecords = records.filter((record) => {
+			const studentId = (record.fields.studentId || "").toLowerCase().trim();
+			return studentId === inputStudentid;
+		});
 
-        const customFieldNames = {
-            Name: "ชื่อจริง",
-            Lastname: "นามสกุล",
-            TeamName: "ชื่อทีม",
-            Game: "เกมที่แข่ง",
-            IGN: "ชื่อในเกม",
-        };
+		if (matchedRecords.length === 0) {
+			return interaction.editReply(
+				"❌ ไม่พบข้อมูลของคุณในฐานข้อมูล โปรดติดต่อ Admin."
+			);
+		}
 
-        const embed = new EmbedBuilder()
-            .setTitle(`✅ ยืนยันตัวตนสำเร็จ: ${interaction.user.username}`)
-            .setColor(0x00ff00)
-            .setThumbnail(interaction.user.displayAvatarURL())
-            .setTimestamp();
+		const allGames = new Set();
+		const allTeams = new Set();
+		const mergedFields = {};
 
-        // Add other fields from mergedFields except filtered keys
-        for (const [key, value] of Object.entries(mergedFields)) {
-            if (["Game", "TeamName"].includes(key)) continue; // Skip these because shown above
-            const displayName = customFieldNames[key] || key;
-            embed.addFields({
-                name: displayName,
-                value: String(value),
-                inline: true,
-            });
-        }
-        // Add summary text with all game names and team names nicely joined
-        embed.addFields({
-            name: "เกมที่แข่ง",
-            value: Array.from(allGames).join(", ") || "-",
-            inline: true,
-        });
-        embed.addFields({
-            name: "ชื่อทีม",
-            value: Array.from(allTeams).join(", ") || "-",
-            inline: true,
-        });
+		for (const record of matchedRecords) {
+			let games = record.fields.Game || [];
+			if (typeof games === "string") games = [games];
+			for (const g of games) allGames.add(g);
 
-        await interaction.channel.send({ embeds: [embed] });
-    } catch (error) {
-        console.error("Error assigning roles:", error);
-        await interaction.editReply(
-            "❌ Failed to assign roles. Please check my permissions."
-        );
-    }
+			if (record.fields.TeamName) allTeams.add(record.fields.TeamName);
+
+			for (const [key, value] of Object.entries(record.fields)) {
+				if (["studentid", "instagram", "discord"].includes(key.toLowerCase())) continue;
+				mergedFields[key] = value;
+			}
+		}
+
+		const guild = interaction.guild;
+		const member = await guild.members.fetch(interaction.user.id);
+		const rolesToAdd = [];
+
+		for (const gameName of allGames) {
+			const role = guild.roles.cache.find(
+				(r) => r.name.toLowerCase() === gameName.toLowerCase()
+			);
+			if (role) rolesToAdd.push(role);
+		}
+
+		for (const teamName of allTeams) {
+			const role = guild.roles.cache.find(
+				(r) => r.name.toLowerCase() === teamName.toLowerCase()
+			);
+			if (role && !rolesToAdd.some((r) => r.id === role.id)) {
+				rolesToAdd.push(role);
+			}
+		}
+
+		if (rolesToAdd.length === 0) {
+			return interaction.editReply(
+				"⚠️ No matching roles found in the server for your games or team."
+			);
+		}
+
+		try {
+			await member.roles.add(rolesToAdd);
+
+			await interaction.editReply(`✅ ยืนยันตัวตนสำเร็จ`);
+
+			const customFieldNames = {
+				Name: "ชื่อจริง",
+				Lastname: "นามสกุล",
+				TeamName: "ชื่อทีม",
+				Game: "เกมที่แข่ง",
+				IGN: "ชื่อในเกม",
+			};
+
+			const embed = new EmbedBuilder()
+				.setTitle(`✅ ยืนยันตัวตนสำเร็จ: ${interaction.user.username}`)
+				.setColor(0x00ff00)
+				.setThumbnail(interaction.user.displayAvatarURL())
+				.setTimestamp();
+
+			for (const [key, value] of Object.entries(mergedFields)) {
+				if (["Game", "TeamName"].includes(key)) continue;
+				const displayName = customFieldNames[key] || key;
+				embed.addFields({
+					name: displayName,
+					value: String(value),
+					inline: true,
+				});
+			}
+
+			embed.addFields({
+				name: "เกมที่แข่ง",
+				value: Array.from(allGames).join(", ") || "-",
+				inline: true,
+			});
+			embed.addFields({
+				name: "ชื่อทีม",
+				value: Array.from(allTeams).join(", ") || "-",
+				inline: true,
+			});
+
+			await interaction.channel.send({ embeds: [embed] });
+		} catch (error) {
+			console.error("Error assigning roles:", error);
+			await interaction.editReply(
+				"❌ Failed to assign roles. Please check my permissions."
+			);
+		}
+	}
 });
+
 
 client.login(TOKEN);
